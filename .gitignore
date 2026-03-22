@@ -185,7 +185,4 @@ torch_distributed/
 *.npz
 *.npy
 
-# Documentation files (temporarily ignored)
-docs/
-research_papers.md
 

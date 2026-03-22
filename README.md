@@ -5,7 +5,7 @@ A comprehensive guide to large-scale distributed training covering GPU architect
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Five Types of Parallelism](#five-types-of-parallelism)
+2. [Six Types of Parallelism](#six-types-of-parallelism)
 3. [Memory Optimization Techniques](#memory-optimization-techniques)
 4. [Performance Optimization](#performance-optimization)
 5. [GPU Hardware Deep Dive](#gpu-hardware-deep-dive)
@@ -15,16 +15,16 @@ A comprehensive guide to large-scale distributed training covering GPU architect
 
 ## Overview
 
-This repository contains a comprehensive guide to large-scale distributed training, covering everything from individual GPU architecture to training models on tens of thousands of GPUs. The content draws from multiple sources including academic papers, industry research, and course materials, with a focus on practical implementation using PyTorch.
+This repository contains a comprehensive guide to large-scale distributed training, covering everything from individual GPU architecture to training models on tens of thousands of GPUs. The content draws from multiple sources including academic papers, industry research, and course materials, with a focus on practical concepts using PyTorch.
 
 ## Single GPU Compatible
 
-All code examples are optimized for single GPU setups (T4/P100/V100). The experiments demonstrate key concepts in distributed training using techniques that work within single GPU constraints.
+All code examples are optimized for single GPU setups (T4/P100/V100). The experiments demonstrate key concepts in distributed training using techniques that work within single GPU constraints. The documentation covers distributed training theory; the code examples focus on single-GPU fundamentals (mixed precision, MFU benchmarking, activation checkpointing) that form the building blocks of larger systems.
 
 ### Key Topics Covered
 
 - **GPU Architecture**: Deep dive into H100, memory hierarchy, and tensor cores
-- **Distributed Training**: Five different types of parallelism
+- **Distributed Training**: Six different types of parallelism
 - **Memory Management**: Activation checkpointing and sharding strategies
 - **Performance Optimization**: Model Flops Utilization (MFU) and benchmarking
 - **Real-world Examples**: Llama3-405B training case study
@@ -53,10 +53,10 @@ All code examples are optimized for single GPU setups (T4/P100/V100). The experi
 > "We've been living through a 1,000x increase in computation over the past 12 years. Anytime anything in the world changes by 1,000x, you should step up and pay attention because that's going to cause major changes in our technological capabilities."
 
 - **2013**: K40 GPU - 5 TFLOPs
-- **2025**: B200 GPU - 5,000 TFLOPs (tensor cores)
+- **2025**: B200 GPU - 4,500 TFLOPs (FP8 tensor cores)
 - **Scale**: From single GPU to 24,000+ GPU clusters
 
-## Five Types of Parallelism
+## Six Types of Parallelism
 
 ### 1. Data Parallelism (DP)
 
@@ -69,8 +69,6 @@ All code examples are optimized for single GPU setups (T4/P100/V100). The experi
 - Communication: All-reduce of gradients
 - Best for: Models that fit on single GPU
 
-**PyTorch Implementation**: See lines 20-30 in `code/examples/single_gpu_training.py`
-
 ### 2. Fully Sharded Data Parallelism (FSDP)
 
 **Concept**: Split model weights across GPUs, not just data.
@@ -78,14 +76,13 @@ All code examples are optimized for single GPU setups (T4/P100/V100). The experi
 **Key Points**:
 
 - Model weights are distributed across GPUs
-- Weights are broadcasted when needed
+- Weights are gathered when needed, then discarded
 - Memory efficient for large models
 - Communication: 3x model size per forward/backward pass
 
 **Memory Savings**:
 
-- 1B parameters = 8 GB memory
-- With 80 GPUs: 10 GB per GPU
+For a 1B parameter model with mixed-precision Adam, total memory per parameter is ~16 bytes (FP16 weights + FP16 gradients + FP32 master weights + FP32 momentum + FP32 variance), giving ~16 GB total. With FSDP across 8 GPUs, each GPU holds only ~2 GB of sharded state plus activation memory.
 
 ### 3. Hybrid Sharded Data Parallelism (HSDP)
 
@@ -107,7 +104,7 @@ All code examples are optimized for single GPU setups (T4/P100/V100). The experi
 - Parallelize over sequence dimension
 - Challenging for attention computation
 - Used for sequences >10,000 tokens
-- Llama3 uses 16-way context parallelism for 130K sequences
+- Llama3 uses context parallelism for 128K sequences
 
 **Attention Parallelization**:
 
@@ -123,7 +120,8 @@ All code examples are optimized for single GPU setups (T4/P100/V100). The experi
 - Sequential dependencies between layers
 - Use microbatches to reduce idle time
 - "Bubble" time when GPUs are waiting
-- Theoretical max efficiency: 1/N (N = number of pipeline stages)
+- Bubble fraction with 1 microbatch: (N-1)/N for N pipeline stages
+- With M microbatches: efficiency ≈ M / (M + N - 1), approaching 1 as M grows
 
 **Optimization**:
 
@@ -150,13 +148,13 @@ All code examples are optimized for single GPU setups (T4/P100/V100). The experi
 
 **Solution**: Recompute activations during backward pass.
 
-**Trade-offs**:
+**Trade-offs** (with standard PyTorch `checkpoint()`):
 
-- **Memory**: O(√N) instead of O(N)
-- **Compute**: O(N√N) instead of O(N)
-- **Checkpoint Frequency**: Every √N layers
+- **Memory**: O(√N) instead of O(N) with checkpoints every √N layers
+- **Compute**: ~1.33x forward cost (one extra forward pass per segment during backward)
+- **Checkpoint Frequency**: Every √N layers is optimal for memory
 
-**Implementation**: See lines 15-25 in `code/examples/activation_checkpointing.py`
+See `code/examples/activation_checkpointing.py` for a working benchmark.
 
 ## Performance Optimization
 
@@ -164,11 +162,9 @@ All code examples are optimized for single GPU setups (T4/P100/V100). The experi
 
 **Definition**: Fraction of theoretical GPU throughput used for model computation.
 
-**Formula**:
+**Formula**: MFU = (model FLOPS per step / step time) / device peak FLOPS/s
 
-**Formula**: See lines 235-237 in `code/examples/mfu_benchmarking.py`
-
-**Benchmarking**: See lines 50-70 in `code/examples/mfu_benchmarking.py`
+See `code/examples/mfu_benchmarking.py` for a working benchmark.
 
 **Target MFU**:
 
@@ -216,28 +212,35 @@ The H100 represents the current state-of-the-art in GPU hardware for deep learni
 | V100 | 2017 | 15          | 125           | 32 GB  |
 | A100 | 2020 | 20          | 312           | 80 GB  |
 | H100 | 2022 | 67          | 989           | 80 GB  |
-| B200 | 2025 | 83          | 5,000         | 192 GB |
+| B200 | 2025 | 83          | ~4,500 (FP8)  | 192 GB |
 
 ## GPU Clusters and Infrastructure
 
-### Llama3-405B Training Cluster
+### Llama3-405B Training Setup
 
-Meta's training infrastructure for Llama3-405B:
+Meta's training infrastructure for Llama3-405B (based on the Llama 3.1 paper):
 
 #### Cluster Architecture
 
-- **Total GPUs**: 24,576 H100s
-- **Memory**: 1.8 TB HBM memory
-- **Compute Cores**: 415M FP32 cores, 13M tensor cores
-- **Peak Performance**: 24 exaflops/second
+- **Training GPUs**: ~16,384 H100s (from a total cluster of 24,576)
+- **Aggregate HBM**: ~1.3 PB (for the 16K training partition)
+- **Compute Cores**: ~277M FP32 cores, ~8.6M tensor cores
+- **Peak Performance**: ~16 exaFLOPS (tensor core)
 
 #### Hierarchy
 
 1. **Single GPU**: 80 GB HBM, 3 TB/s bandwidth
-2. **GPU Server**: 8 GPUs, 900 GB/s inter-GPU communication
-3. **Server Rack**: 16 GPUs (2 servers), 6 feet tall
-4. **GPU Pod**: 3,072 GPUs (192 racks), 50 GB/s inter-rack
+2. **GPU Server**: 8 GPUs, 900 GB/s inter-GPU communication (NVLink)
+3. **Server Rack**: 16 GPUs (2 servers)
+4. **GPU Pod**: 3,072 GPUs (192 racks), 50 GB/s inter-rack (RoCE)
 5. **Full Cluster**: 24,576 GPUs (8 pods)
+
+#### Multi-Dimensional Parallelism (for 405B training)
+
+- Tensor Parallelism: 8-way
+- Pipeline Parallelism: 16-way
+- Data Parallelism: fills remaining (128-way)
+- Total: 8 × 16 × 128 = 16,384 GPUs
 
 ### Communication Bandwidth
 
@@ -256,7 +259,7 @@ Meta's training infrastructure for Llama3-405B:
 - [PaLM: Scaling Language Modeling with Pathways](https://arxiv.org/abs/2204.02311)
 - [LLaMA: Open and Efficient Foundation Language Models](https://arxiv.org/abs/2302.13971)
 - [ZeRO: Memory Optimizations Toward Training Trillion Parameter Models](https://arxiv.org/abs/1910.02054)
-- [Ring Attention with Blockwise Parallelism for Long Sequences](https://arxiv.org/abs/2310.01889)
+- [Ring Attention with Blockwise Transformers for Near-Infinite Context](https://arxiv.org/abs/2310.01889)
 - [DeepSpeed Ulysses: System Optimizations for Enabling Training of Extreme Long Sequence Transformer Models](https://arxiv.org/abs/2309.14509)
 - [GPipe: Efficient Training of Giant Neural Networks using Pipeline Parallelism](https://arxiv.org/abs/1811.06965)
 - [GShard: Scaling Giant Models with Conditional Computation and Automatic Sharding](https://arxiv.org/abs/2006.16668)
@@ -291,31 +294,37 @@ Meta's training infrastructure for Llama3-405B:
 
 ## Code Examples
 
-> **Note**: All examples are optimized for single GPU setups (T4/P100/V100).
+> **Note**: All examples are optimized for single GPU setups (T4/P100/V100) with CPU fallback. The documentation covers distributed training concepts; the code demonstrates single-GPU building blocks.
 
 ### Single GPU Training
 
-**Implementation**: See lines 1-50 in `code/examples/single_gpu_training.py`
+**File**: `code/examples/single_gpu_training.py`
+
+- CIFAR-10 classification with mixed precision
+- Training speed benchmarking (FP32 vs FP16)
+- Training and evaluation loop with visualization
 
 ### MFU Benchmarking (Performance Analysis)
 
-**File**: `code/examples/mfu_benchmarking.py` (lines 1-402)
+**File**: `code/examples/mfu_benchmarking.py`
 
 Key features:
 
-- Model Flops Utilization calculation
-- Performance benchmarking across different configurations
-- Memory vs speed trade-off analysis
+- Correct FLOPS calculation (2 × batch × in × out per Linear layer)
+- Separate FP32 and FP16 tensor-core peak references
+- MFU vs batch size and model size sweeps
+- CPU-safe fallback
 
 ### Activation Checkpointing (Memory Optimization)
 
-**File**: `code/examples/activation_checkpointing.py` (lines 1-433)
+**File**: `code/examples/activation_checkpointing.py`
 
 Key features:
 
-- Memory vs compute trade-off analysis
-- Adaptive checkpointing strategies
-- Performance benchmarking with different checkpoint frequencies
+- True peak memory tracking via `torch.cuda.max_memory_allocated()`
+- Isolated strategy comparison (models freed between strategies)
+- Checkpoint frequency sweep
+- Uses `use_reentrant=False` (modern PyTorch best practice)
 
 ## Contributing
 
